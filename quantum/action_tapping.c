@@ -68,21 +68,27 @@ static uint8_t           speculative_mods                        = 0;
 static void speculative_key_press(keyrecord_t *record);
 #    endif // SPECULATIVE_HOLD
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
-#        define REGISTERED_TAPS_SIZE 8
+#    define REGISTERED_TAPS_SIZE 8
 // Array of tap-hold keys that have been settled as tapped but not yet released.
-static keypos_t registered_taps[REGISTERED_TAPS_SIZE] = {};
-static uint8_t  num_registered_taps                   = 0;
+struct registered_tap_t {
+  keypos_t key;
+  uint8_t  count    : 4;
+  bool     is_combo : 1;
+};
+
+static struct registered_tap_t registered_taps[REGISTERED_TAPS_SIZE] = {};
+static uint8_t                 num_registered_taps                   = 0;
 
 /** Adds `key` to the registered_taps array. */
-static void registered_taps_add(keypos_t key);
+static void registered_taps_add(keyrecord_t *record);
 /** Returns the index of `key` in registered_taps, or -1 if not found. */
-static int8_t registered_tap_find(keypos_t key);
+static int8_t registered_tap_find(keyrecord_t *record);
 /** Removes index `i` from the registered_taps array. */
 static void registered_taps_del_index(uint8_t i);
 /** Logs the registered_taps array for debugging. */
 static void debug_registered_taps(void);
 
+#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
 static bool is_mt_or_lt(uint16_t keycode) {
     return IS_QK_MOD_TAP(keycode) || IS_QK_LAYER_TAP(keycode);
 }
@@ -253,19 +259,17 @@ void action_tapping_process(keyrecord_t record) {
 bool process_tapping(keyrecord_t *keyp) {
     const keyevent_t event = keyp->event;
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
     if (!event.pressed) {
-        const int8_t i = registered_tap_find(event.key);
+        const int8_t i = registered_tap_find(keyp);
         if (i != -1) {
             // If a tap-hold key was previously settled as tapped, set its
             // tap.count correspondingly on release.
-            keyp->tap.count = 1;
+            keyp->tap.count = registered_taps[i].count;
             registered_taps_del_index(i);
             ac_dprintf("Found tap release for [%d]\n", i);
             debug_registered_taps();
         }
     }
-#    endif // defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
 
     // state machine is in the "reset" state, no tapping key is to be
     // processed
@@ -350,7 +354,7 @@ bool process_tapping(keyrecord_t *keyp) {
 
                     ac_dprintf("Tapping: End. Chord considered a tap\n");
                     tapping_key.tap.count = 1;
-                    registered_taps_add(tapping_key.event.key);
+                    registered_taps_add(&tapping_key);
                     process_record(&tapping_key);
                     tapping_key = (keyrecord_t){0};
 
@@ -460,7 +464,7 @@ bool process_tapping(keyrecord_t *keyp) {
                             if (!is_tap_record(keyp)) {
                                 ac_dprintf("Tapping: End. Chord considered a tap\n");
                                 tapping_key.tap.count = 1;
-                                registered_taps_add(tapping_key.event.key);
+                                registered_taps_add(&tapping_key);
                                 debug_registered_taps();
                                 process_record(&tapping_key);
                                 tapping_key = (keyrecord_t){0};
@@ -512,18 +516,9 @@ bool process_tapping(keyrecord_t *keyp) {
                     return true;
                 } else if (is_tap_record(keyp) && event.pressed) {
                     if (tapping_key.tap.count > 1) {
-                        ac_dprintf("Tapping: Start new tap with releasing last tap(>1).\n");
-                        // unregister key
-                        process_record(&(keyrecord_t){
-                            .tap           = tapping_key.tap,
-                            .event.key     = tapping_key.event.key,
-                            .event.time    = event.time,
-                            .event.pressed = false,
-                            .event.type    = tapping_key.event.type,
-#    ifdef COMBO_ENABLE
-                            .keycode = tapping_key.keycode,
-#    endif
-                        });
+                        ac_dprintf("Tapping: Start new tap with saving last tap(>1).\n");
+                        registered_taps_add(&tapping_key);
+                        debug_registered_taps();
                     } else {
                         ac_dprintf("Tapping: Start while last tap(1).\n");
                     }
@@ -563,18 +558,9 @@ bool process_tapping(keyrecord_t *keyp) {
                     return true;
                 } else if (is_tap_record(keyp) && event.pressed) {
                     if (tapping_key.tap.count > 1) {
-                        ac_dprintf("Tapping: Start new tap with releasing last timeout tap(>1).\n");
-                        // unregister key
-                        process_record(&(keyrecord_t){
-                            .tap           = tapping_key.tap,
-                            .event.key     = tapping_key.event.key,
-                            .event.time    = event.time,
-                            .event.pressed = false,
-                            .event.type    = tapping_key.event.type,
-#    ifdef COMBO_ENABLE
-                            .keycode = tapping_key.keycode,
-#    endif
-                        });
+                        ac_dprintf("Tapping: Start new tap with saving last timeout tap(>1).\n");
+                        registered_taps_add(&tapping_key);
+                        debug_registered_taps();
                     } else {
                         ac_dprintf("Tapping: Start while last timeout tap(1).\n");
                     }
@@ -879,21 +865,23 @@ void speculative_key_settled(keyrecord_t *record) {
 }
 #    endif // SPECULATIVE_HOLD
 
-#    if defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
-static void registered_taps_add(keypos_t key) {
+static void registered_taps_add(keyrecord_t *record) {
     if (num_registered_taps >= REGISTERED_TAPS_SIZE) {
         ac_dprintf("TAPS OVERFLOW: CLEAR ALL STATES\n");
         clear_keyboard();
         num_registered_taps = 0;
     }
 
-    registered_taps[num_registered_taps] = key;
+    registered_taps[num_registered_taps].key      = record->event.key;
+    registered_taps[num_registered_taps].count    = record->tap.count;
+    registered_taps[num_registered_taps].is_combo = IS_COMBOEVENT(record->event);
     ++num_registered_taps;
 }
 
-static int8_t registered_tap_find(keypos_t key) {
+static int8_t registered_tap_find(keyrecord_t *record) {
+    keyevent_t event = record->event;
     for (int8_t i = 0; i < num_registered_taps; ++i) {
-        if (KEYEQ(registered_taps[i], key)) {
+        if (KEYEQ(registered_taps[i].key, event.key) && IS_COMBOEVENT(event) == registered_taps[i].is_combo) {
             return i;
         }
     }
@@ -912,12 +900,11 @@ static void registered_taps_del_index(uint8_t i) {
 static void debug_registered_taps(void) {
     ac_dprintf("registered_taps = { ");
     for (int8_t i = 0; i < num_registered_taps; ++i) {
-        ac_dprintf("%02X%02X ", registered_taps[i].row, registered_taps[i].col);
+        ac_dprintf("%02X%02X:%d ", registered_taps[i].key.row, registered_taps[i].key.col, registered_taps[i].count);
     }
     ac_dprintf("}\n");
 }
 
-#    endif // defined(CHORDAL_HOLD) || defined(FLOW_TAP_TERM)
 
 #    ifdef CHORDAL_HOLD
 __attribute__((weak)) bool get_chordal_hold(uint16_t tap_hold_keycode, keyrecord_t *tap_hold_record, uint16_t other_keycode, keyrecord_t *other_record) {
@@ -965,7 +952,7 @@ static void waiting_buffer_chordal_hold_taps_until(keypos_t key) {
         ac_dprintf("waiting_buffer_chordal_hold_taps_until: processing [%u]\n", waiting_buffer_tail);
         if (record->event.pressed && is_tap_record(record)) {
             record->tap.count = 1;
-            registered_taps_add(record->event.key);
+            registered_taps_add(record);
         }
         process_record(record);
         waiting_buffer_tail = (waiting_buffer_tail + 1) % WAITING_BUFFER_SIZE;
@@ -1045,7 +1032,7 @@ static bool flow_tap_key_if_within_term(keyrecord_t *record, uint16_t prev_time)
             debug_event(record->event);
             ac_dprintf(" within flow tap term (%u < %u) considered a tap\n", idle_time, term);
             record->tap.count = 1;
-            registered_taps_add(record->event.key);
+            registered_taps_add(record);
             debug_registered_taps();
             process_record(record);
             return true;

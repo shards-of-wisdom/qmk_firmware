@@ -149,6 +149,8 @@ static queued_combo_t combo_buffer[COMBO_BUFFER_LENGTH];
         } while (0)
 #endif
 
+#define COMBO_INDEX_TO_KEYPOS(index) ((union { keypos_t k; uint16_t i; }) { .i = index }).k
+
 static inline void release_combo(uint16_t combo_index, combo_t *combo) {
     if (combo->keycode) {
         keyrecord_t record = {
@@ -156,6 +158,7 @@ static inline void release_combo(uint16_t combo_index, combo_t *combo) {
             .keycode = combo->keycode,
         };
 #ifndef NO_ACTION_TAPPING
+        record.event.key = COMBO_INDEX_TO_KEYPOS(combo_index);
         action_tapping_process(record);
 #else
         process_record(&record);
@@ -235,6 +238,9 @@ static inline void dump_key_buffer(void) {
             process_combo_event(qrecord->combo_index, true);
         } else {
 #ifndef NO_ACTION_TAPPING
+            if (qrecord->combo_index != (uint16_t) -1) {
+                record->event.key = COMBO_INDEX_TO_KEYPOS(qrecord->combo_index);
+            }
             action_tapping_process(*record);
 #else
             process_record(record);
